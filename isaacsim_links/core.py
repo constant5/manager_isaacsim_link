@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 from isaacsim_links.logger import logger
 import site
+import stat
 
 # Dynamically find the site-packages directory of the current Python environment
 # Get standard library paths, usually in the Python installation directory
@@ -33,6 +34,7 @@ if not site_packages:
     raise RuntimeError("Unable to find site-packages directory, please specify path manually")
 
 isaacsim_site_packages = site_packages / "isaacsim"
+isaaclab_site_packages =  site_packages / "isaaclab"
 omni_site_packages = site_packages / "omni"
 carb_site_packages = site_packages / "carb"
 
@@ -52,6 +54,9 @@ def check_base_paths():
     if not isaacsim_site_packages.exists():
         logger.error(f"Isaac Sim directory not found: {isaacsim_site_packages}")
         raise RuntimeError(f"Isaac Sim directory not found: {isaacsim_site_packages}")
+    if not isaaclab_site_packages.exists():
+        logger.error(f"Isaac Sim directory not found: {isaaclab_site_packages}")
+        raise RuntimeError(f"Isaac Sim directory not found: {isaaclab_site_packages}")
     if not omni_site_packages.exists():
         logger.error(f"Omni directory not found: {omni_site_packages}")
         raise RuntimeError(f"Omni directory not found: {omni_site_packages}")
@@ -97,6 +102,12 @@ def get_ext_configs():
             "exts_dir": isaacsim_site_packages / "extscache",
             "prefix": ["isaacsim."], # "omni.", "carb.", 
             "description": "Isaac Sim Extension Cache",
+        },
+        {
+            "name": "isaaclab.source",
+            "exts_dir": isaaclab_site_packages / "source",
+            "prefix": [""], # "omni.", "carb.", 
+            "description": "Isaac Lab Source",
         },
     ]
 
@@ -213,6 +224,24 @@ def find_all_init_paths(base_dir: Path, module_namespace: list[str]) -> list:
     return found_paths
 
 
+def create_links_isaaclab_links(ext_config, created_links, created_dirs):
+    src_root = ext_config["exts_dir"]
+    for item in src_root.iterdir():
+        if item.name == "isaaclab":
+            inner = item / item.name
+            for inner_item in item.iterdir():
+                src = inner_item
+                dst = isaaclab_site_packages / inner_item.name
+                if create_symlink_safely(src, dst, created_links, created_dirs):
+                    newly_created_count += 1
+        else:
+            src = item / item.name
+            dst = isaaclab_site_packages.parent / item.name
+            if create_symlink_safely(src, dst, created_links, created_dirs):
+                newly_created_count += 1
+        
+
+
 def create_links(use_new_mode=True):
     """Traverse all configured extension directories and create symbolic links
 
@@ -236,6 +265,11 @@ def create_links(use_new_mode=True):
         description = ext_config["description"]
         prefixes = ext_config["prefix"]
 
+        # --- Special handling for pip-installed Isaac Lab source layout ---
+        if ext_config.get("name") == "isaaclab.source":
+            create_links_isaaclab_links(ext_config, created_links, created_dirs)
+            continue
+
         if not exts_dir.is_dir():
             logger.warning(f"Extension directory not found: {exts_dir}, skipping this configuration")
             continue
@@ -248,9 +282,6 @@ def create_links(use_new_mode=True):
 
                 ext_name = item.name
                 logger.info(f"Processing extension directory: {ext_name}")
-
-                if "core" in ext_name:
-                    print(ext_name)
 
                 if use_new_mode:
                     # --- New mode logic ---
@@ -528,6 +559,25 @@ def is_directory_empty(dir_path: Path) -> bool:
         logger.error(f"Error checking if directory '{dir_path}' is empty: {e}")
         return False  # Assume not empty if we can't check
 
+def is_reparse_point_or_junction(p: Path) -> bool:
+    """
+    Return True if the given path is:
+      - a symbolic link, OR
+      - an NTFS junction (directory reparse point), OR
+      - any reparse point recognized by Windows.
+    Works on Windows; on other OSes this effectively behaves like is_symlink().
+    """
+    # pathlib 3.12+ has Path.is_junction(); fall back if absent
+    is_junction = getattr(p, "is_junction", lambda: False)()
+
+    try:
+        if is_junction:
+            return True
+        # Generic reparse point check via file attributes
+        return bool(p.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    except FileNotFoundError:
+        return False
+
 
 def remove_links():
     """Remove created symbolic links and their possibly empty parent directories based on record file"""
@@ -571,6 +621,11 @@ def remove_links():
                 logger.info("Successfully removed symbolic link.")
                 removed_this_iteration = True
                 removed_count += 0
+            elif is_reparse_point_or_junction(link_path):
+                os.rmdir(link_path)
+                logger.info("Successfully removed NTFS junction point.")
+                removed_this_iteration = True
+                removed_count += 0
             elif link_path.exists():
                 # 2. Path exists but is not a symbolic link - this is an anomaly
                 logger.warning("Path exists but is not a symbolic link.")
@@ -596,6 +651,7 @@ def remove_links():
                     isaacsim_site_packages,
                     omni_site_packages,
                     carb_site_packages,
+                    isaaclab_site_packages,
                 ]
                 while (
                     current_parent.exists()
