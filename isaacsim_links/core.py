@@ -145,6 +145,7 @@ def create_symlink_safely(
             )
     elif link_path.exists():
         logger.warning(f"Link target location already exists, skipping: {link_path}")
+        links_created_record.add(str(link_path))
         return False
 
     logger.info(f"Creating link: {link_path} -> {source}")
